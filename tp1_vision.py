@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.25.0"
+__generated_with = "0.25.1"
 app = marimo.App(
     width="medium",
     app_title="TD 1 - Vision avancée et transfer learning",
@@ -377,9 +377,9 @@ def _(mo):
     mo.md(r"""
     **Votre réponse :**
 
-    1. ...
-    2. ...
-    3. ...
+    1. Les trois modèle sont en accord. Lorsque les modèles se trompent, les 3 le font. C'est erreur sont "compréhensible", nous voyons les similariatés dans les objects deviné et la vraie photo.
+    2. Très peu de confiance, pour l'astronaute, le maximum de confiance est 14%. Son usage est utile pour poser des hypothèse sur nos modèles, mais ca ne peut pas etre le seule paramètre.
+    3. On remarque que resnet18 et deit_tiny sont les plus rapide : 7 ms avec resnet18 et 8 ms avec deit_tiny. J'utiliserai donc resnet18 si il y a ENORMÉMENT de calcul mais deit_tiny est aussi très bon.
     """)
     return
 
@@ -457,9 +457,15 @@ def _(mo):
 def _(nn):
     def retirer_tete(modele):
         """Remplace la couche de classification par nn.Identity() et renvoie le modèle."""
-        # TODO 1 : trouvez la tête de classification et remplacez-la par nn.Identity().
-        # La même fonction doit marcher pour les trois modèles.
-        raise NotImplementedError("À compléter")
+        if hasattr(modele,"fc"):
+            modele.fc=nn.Identity()
+        elif hasattr(modele,"classifier"):
+            modele.classifier=nn.Identity()
+        else :
+            modele.head = nn.Identity()
+        return modele
+   
+
     return (retirer_tete,)
 
 
@@ -576,8 +582,8 @@ def _(mo):
     mo.md(r"""
     **Votre réponse :**
 
-    1. ...
-    2. ...
+    1. Sur la validation, tout dépends de ce qu'on cherche. Si on veut le plus leger et rapide, le deit_tiny donne le meilleur embedding mais on sacrifie l'accuracy. Si on veut maximiser notre accuracy, on choisi le efficientnet_bo mais on prends le modèle le plus lent et avec le plus de paramètres.  Finalement, le modèle resnet me semble le moins bon, il prends autant de temps "quasiment" que efficient mais a une moins bonne accuracy de 2 points.
+    2. Comme j'ai pu dire dans la précédente réponse, le meilleur si on veut rester sur CPU , c'est deit-tiny.
     """)
     return
 
@@ -610,8 +616,18 @@ def _(np):
 
     def descripteurs_classiques(image):
         """image : PIL.Image -> vecteur numpy de longueur 1812 (HOG + histogrammes de couleur)."""
-        # TODO 2
-        raise NotImplementedError("À compléter")
+        image = image.convert("RGB").resize((128,128))
+        gris = np.asarray(image.convert("L"),dtype=np.float64)/255
+        HOG = hog(gris,orientations=9, pixels_per_cell=(16,16),cells_per_block=(2,2))
+
+        rgb = np.asarray(image)
+        histogramme = []
+        for c in range(3):
+            h, _ = np.histogram(rgb[:,:,c],bins=16, range=(0,256))
+            histogramme.append(h/h.sum())
+
+        return np.concatenate([HOG]+histogramme) 
+
     return (descripteurs_classiques,)
 
 
@@ -665,7 +681,7 @@ def _(
 def _(mo, resultat_classique, resultats_fe, tp):
     tableau_comparatif = [resultat_classique] + list(resultats_fe)
     mo.vstack([mo.md(f"Hasard : {1 / 37:.1%} (37 classes)."), tp.tableau(tableau_comparatif, mo)])
-    return (tableau_comparatif,)
+    return
 
 
 @app.cell(hide_code=True)
@@ -686,9 +702,9 @@ def _(mo):
     mo.md(r"""
     **Votre réponse :**
 
-    1. ...
-    2. ...
-    3. ...
+    1. Très grand écart 15 % d'accuracy pour HOG, par rapport à plus de 90% pour les autres. Cet écart de justifie pas son utilisation, surtout quand deit_tiny est toujours plus rapide.
+    2. D'après l'accuracy, HOG a enormément de mal à distinguer deux races proches. J'imagine que, comme le HOG ne prends pas la couleur en compte, un des éléments importants pour distinguer les deux races, il a beaucoup plus de mal à correctement le claffisier.
+    3. J'imagine que, si on doit faire le tri de pièce mécanique , le HOG aura donc des formes très différentes et donc plus facile pour lui à identifier.
     """)
     return
 
@@ -721,8 +737,14 @@ def _(mo):
 @app.function
 def geler_backbone(modele, n_etages_degeles):
     """Gèle tout sauf les n derniers étages de modele.features et modele.classifier. Renvoie le modèle."""
-    # TODO 3
-    raise NotImplementedError("À compléter")
+    for p in modele.parameters():
+        p.requires_grad = False
+    if n_etages_degeles > 0 :
+        for p in modele.features[-n_etages_degeles:].parameters():
+            p.requires_grad = True
+    for p in modele.classifier.parameters():
+        p.requires_grad = True
+    return modele
 
 
 @app.cell(hide_code=True)
@@ -752,8 +774,23 @@ def _(mo):
 def _(torch):
     def creer_optimiseur(modele, lr_tete, lr_backbone):
         """Renvoie un AdamW avec un learning rate pour la tête et un autre pour le backbone dégelé."""
-        # TODO 4
-        raise NotImplementedError("À compléter")
+        params_tete = []
+        params_backbone = []
+        id_tete = set()
+
+        for p in modele.classifier.parameters():
+            params_tete.append(p)
+            id_tete.add(id(p))
+        
+        for p in modele.parameters():
+            if p.requires_grad and id(p) not in id_tete:
+                params_backbone.append(p)
+    
+        groupes=[{"params": params_tete, "lr": lr_tete}]
+        if params_backbone:
+            groupes.append({"params":params_backbone, "lr": lr_backbone})
+        return torch.optim.AdamW(groupes,weight_decay=1e-4)
+
     return (creer_optimiseur,)
 
 
@@ -782,8 +819,18 @@ def _(mo):
 @app.function
 def entrainer_une_epoque(modele, chargeur, optimiseur, critere, appareil):
     """Entraîne le modèle sur un passage complet du chargeur. Renvoie la perte moyenne (float)."""
-    # TODO 5
-    raise NotImplementedError("À compléter")
+    modele.train()
+    sommes_perte = 0.0
+    exemple = 0
+    for x,y in chargeur:
+        x,y = x.to(appareil), y.to(appareil)
+        optimiseur.zero_grad()
+        perte = critere(modele(x),y)
+        perte.backward()
+        optimiseur.step()
+        sommes_perte += perte.item()*len(y)
+        exemple += len(y)
+    return sommes_perte/exemple
 
 
 @app.cell(hide_code=True)
@@ -923,12 +970,12 @@ def _(mo):
 
     | Étages dégelés | Époques | LR tête | LR backbone | Accuracy de validation | Durée |
     |---|---|---|---|---|---|
-    | 0 | | | | | |
-    | | | | | | |
+    | 0 |4 |3e-3 | 3e-4| 72,4%| 13,4s|
+    | 2|4 |3e-3 | 3e-4|77,6% |14,4s |
 
-    Conclusion (à résolution égale, dégeler des étages vaut-il son coût par rapport à la tête seule ? Les écarts
-    dépassent-ils l'incertitude de mesure ? Comment le résultat se situe-t-il par rapport au meilleur score de
-    l'étape 4 ? Quelle configuration retenez-vous ?) : ...
+    Conclusion (à résolution égale, dégeler des étages vaut-il son coût par rapport à la tête seule ? En voyant nos résultats, on peut conclure que oiui, cela vaut le coute. Notre accuracy augment de 5 points avec un seconde de temps ajouté au total. Les écarts
+    dépassent-ils l'incertitude de mesure ?Sauf que non, si nous partons avec une incertitude de 5 points, la différence se situe dans cette zone.  Comment le résultat se situe-t-il par rapport au meilleur score de
+    l'étape 4 ? Quelle configuration retenez-vous ?) : Pas fou honnetement, l'accuracy est basse comparer aux 90% des autres modèles. Mais nous devons prendre en compte le détail des images n'est pas apreil ( 224 à l'étape 4 et 160 pour l'étape 6). Pour le moment, le meilleur modèle serait le EfficientNet pour l'accuracy avant et ici ce serait avec 2 étages dégelés.
     """)
     return
 
@@ -974,7 +1021,17 @@ def _(bouton_test, classes, img_te, mo, modele_ft, np, tp, y_te):
 
 
 @app.cell(hide_code=True)
-def _(descripteurs_classiques, historique_ft, img_te, mo, np, pred_ft, svm_classique, tp, y_te):
+def _(
+    descripteurs_classiques,
+    historique_ft,
+    img_te,
+    mo,
+    np,
+    pred_ft,
+    svm_classique,
+    tp,
+    y_te,
+):
     _ds = tp.DatasetImages(img_te, y_te, transform=lambda x: x)
     _f_te = np.stack([descripteurs_classiques(_ds.image_brute(i)) for i in range(len(_ds))])
     _acc_classique = float(np.mean(svm_classique.predict(_f_te) == np.asarray(y_te)))
@@ -1004,8 +1061,13 @@ def _(mo):
 @app.function
 def paires_les_plus_confondues(matrice, noms, k=5):
     """matrice[i, j] = nombre d'images de classe i prédites j. Renvoie [(nom_i, nom_j, nombre), ...]."""
-    # TODO 6
-    raise NotImplementedError("À compléter")
+    paires = []
+    for i in range(len(noms)):
+        for j in range(len(noms)):
+            if i != j and matrice[i,j]>0:
+                paires.append((noms[i],noms[j],int(matrice[i,j])))
+    paires.sort(key=lambda p: p[2],reverse=True)
+    return paires[:k]
 
 
 @app.cell(hide_code=True)
@@ -1039,6 +1101,8 @@ def _(mo):
     **Votre réponse :** ces confusions sont-elles compréhensibles pour un humain ? Quelles pistes (données,
     résolution, modèle) proposeriez-vous pour les réduire ? Elles seraient à évaluer sur la validation, puis sur
     un nouveau jeu de test.
+
+    Ces confusions sont compréhensibles car même un humain aurait du mal à faire la différence. Ce qui pourrait aider : plus d'image par race et des images avec plus de détails.
 
     ...
     """)
@@ -1080,36 +1144,45 @@ def _(mo):
     return
 
 
-@app.cell
-def _(torch):
-    def grad_cam(modele, couche, image, classe=None):
-        """image : tenseur (1, 3, H, W). Renvoie une carte numpy (h, w) dans [0, 1] pour `classe`
-        (par défaut, la classe prédite)."""
-        # TODO 7
-        raise NotImplementedError("À compléter")
-    return (grad_cam,)
+@app.function
+def grad_cam(modele, couche, image, classe=None):
+    """image : tenseur (1, 3, H, W). Renvoie une carte numpy (h, w) dans [0, 1] pour `classe`
+    (par défaut, la classe prédite)."""
+    activations = {}
+    gradients = {}
+
+    def les_gradients(g):
+        gradients["couche"]= g
+
+    def garder(module,entree, sortie):
+        activations["couche"]= sortie
+        sortie.register_hook(les_gradients)
+
+    crochet = couche.register_forward_hook(garder)
+    scores = modele(image)
+    if classe is None:
+        classe = int(scores.argmax(dim=1))
+    modele.zero_grad()
+    scores[0,classe].backward()
+    crochet.remove()
+
+    cartes = activations["couche"][0].detach()
+    grads = gradients["couche"][0].detach()
+    poids = grads.mean(dim=(1,2))
+    carte = (poids[:,None,None]*cartes).sum(dim=0).relu()
+    carte = (carte - carte.min())/(carte.max() - carte.min()+ 1e-8)
+    return carte.cpu().numpy()
 
 
 @app.cell(hide_code=True)
-def _(grad_cam, mo, tests, tp):
+def _(mo, tests, tp):
     ok_todo7, _affichage = tp.verifier(tests.tests_gradcam(grad_cam), mo)
     _affichage
     return (ok_todo7,)
 
 
 @app.cell
-def _(
-    classes,
-    ds_test_ft,
-    grad_cam,
-    mo,
-    modele_ft,
-    np,
-    ok_todo7,
-    pred_ft,
-    tp,
-    y_te,
-):
+def _(classes, ds_test_ft, mo, modele_ft, np, ok_todo7, pred_ft, tp, y_te):
     tp.bloquer_si(not ok_todo7, mo, "Terminez le TODO 7 pour appliquer Grad-CAM.")
     for _p in modele_ft.parameters():
         _p.requires_grad_(True)  # nécessaire si une partie du réseau était gelée
@@ -1139,6 +1212,7 @@ def _(mo):
 
     **Votre réponse :** le modèle regarde-t-il l'animal ou autre chose (fond, coussin, main) ?
     Les erreurs s'expliquent-elles par la zone regardée ?
+    Nous remarquons que pour les classe bien prédites, la zone "chaude" est bien sur le visage/ corps de l'animal. Dans les classes mal prédites, les zones "chaudes" sont autour de l'animal, donc naturellement, la prédiction ne peut pas etre juste.
 
     ...
     """)
@@ -1165,17 +1239,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(
-    Image,
-    classes,
-    grad_cam,
-    mo,
-    modele_ft,
-    ok_todo7,
-    plt,
-    televersement,
-    tp,
-):
+def _(Image, classes, mo, modele_ft, ok_todo7, plt, televersement, tp):
     import io as _io
 
     mo.stop(not televersement.value, mo.md("En attente d'une image."))
@@ -1205,7 +1269,8 @@ def _(mo):
     qui somment toujours à 100 % sur les 37 races, permettent-elles de le détecter ? En service, qu'est-ce qui
     différera des images de test (photos d'utilisateurs, appareils, cadrage) ?
 
-    ...
+    Le modèle me renvoie quand même des prédictions de classe, avec un faible niveau de confiance pour chaque race. De toute manière, notre modèle n'a pas de catégorie "autre" donc il est forcé de trouver quelque dans les 37 classes, même si mon image ne ressemble en rien à un animal ( c'est un dessert , Kunefe, archi bon je recommande).
+    J'imagine qu'en service, la photo seront beaucoup plus standardisé, même lumière, position similaire, même fonds et le cadrage sera le même. Ce qui devrait aider notre modèle a etre plus précis.
     """)
     return
 
@@ -1226,13 +1291,13 @@ def _(mo):
     | Rubrique | Votre réponse |
     |---|---|
     | Problème métier | Reconnaître la race d'un animal à partir d'une photo |
-    | Baseline classique et son score (test) | ... |
-    | Modèle retenu et pourquoi | ... |
-    | Métrique principale et score obtenu (test, avec son intervalle à 95 %) | ... |
-    | Coût (temps d'entraînement, temps d'inférence, matériel) | ... |
-    | Principaux cas d'échec | ... |
-    | Le deep learning est-il justifié ici ? | ... |
-    | Déployable en l'état ? Sinon, que manque-t-il ? | ... |
+    | Baseline classique et son score (test) | HOG + couleur + SVM (baseline classique)-> accuracy = 0.101 |
+    | Modèle retenu et pourquoi | EfficientNet-B0, 2 étage(s) dégelé(s) (configuration retenue)-> accuracy=0.787, melleur équilibre entre résultat/rapidité |
+    | Métrique principale et score obtenu (test, avec son intervalle à 95 %) | 78,7% |
+    | Coût (temps d'entraînement, temps d'inférence, matériel) | 14,4 s, 4,3 ms par image, macbook pro M4 Pro  |
+    | Principaux cas d'échec | les paires confondus, carte Grad-CAM et pas de classe autre pour les images hors sujet |
+    | Le deep learning est-il justifié ici ? | Oui, l'écart entre la baseline et mon modèle (68 points) |
+    | Déployable en l'état ? Sinon, que manque-t-il ? | Non, ne peut pas gérer des images hors sujet |
     """)
     return
 
