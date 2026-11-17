@@ -241,8 +241,20 @@ def _(mo):
 @app.function
 def iou(boite_a, boite_b):
     """IoU entre deux boîtes [x1, y1, x2, y2]. Renvoie un float dans [0, 1]."""
-    # TODO 1
-    raise NotImplementedError("À compléter")
+    x1 = max(boite_a[0],boite_b[0])
+    y1 = max(boite_a[1],boite_b[1])
+    x2 = min(boite_a[2],boite_b[2])
+    y2 = min(boite_a[3],boite_b[3])
+
+    largeur = max(0,x2 - x1)
+    hauteur = max(0,y2-y1)
+    intersection = largeur * hauteur
+    aire_a = (boite_a[2]-boite_a[0])*(boite_a[3]-boite_a[1])
+    aire_b = (boite_b[2]-boite_b[0])*(boite_b[3]-boite_b[1])
+    union = aire_a + aire_b - intersection
+    if union <= 0 :
+        return 0.0
+    return float(intersection/union)
 
 
 @app.cell(hide_code=True)
@@ -277,8 +289,21 @@ def _(mo):
 def _(np):
     def nms(boites, scores, seuil_iou):
         """Non-Maximum Suppression. Renvoie la liste des indices conservés, par score décroissant."""
-        # TODO 2
-        raise NotImplementedError("À compléter")
+        ordre = np.argsort(-scores)
+        restants=[]
+        for i in ordre :
+            restants.append(int(i))
+        gardes = []
+        while len(restants)>0:
+            meilleur = restants.pop(0)
+            gardes.append(meilleur)
+            suivantes = []
+            for i in restants:
+                if iou(boites[meilleur], boites[i])<= seuil_iou:
+                    suivantes.append(i)
+            restants=suivantes
+        return gardes
+
     return (nms,)
 
 
@@ -392,7 +417,8 @@ def _(mo):
 @app.cell
 def _(mo):
     mo.md(r"""
-    **Votre réponse :** ...
+    **Votre réponse :** Les classes ne sont pas equilibrées, nous remarquons que certaines sont bien plus représenter que d'autres. La classe que nous allons avoir le plus de mal a detecter, c'est les lunettes de protection (goggle). C'est une classe avec peu de boites et c'est boite sont petites.
+    C'est embétant si le detection se trompe car nous sommes dans la recherche de sécurité, donc si on ne detecete pas bien ou pas du tout, c'est un danger qu'on laisse sur le chantier.
     """)
     return
 
@@ -503,8 +529,14 @@ def _(mo):
 def _(cv2, np):
     def boites_depuis_masque(masque, aire_min):
         """Une boîte [x1, y1, x2, y2] par composante connexe d'au moins aire_min pixels."""
-        # TODO 3
-        raise NotImplementedError("À compléter")
+        n, etiquettes, stats, centres = cv2.connectedComponentsWithStats(masque.astype(np.uint8))
+        boites = []
+        for i in range(1,n):
+            x,y,largeur,hauteur,aire = stats[i]
+            if aire >= aire_min :
+                boites.append([int(x),int(y),int(x + largeur),int(y + hauteur)])
+        return boites
+
     return (boites_depuis_masque,)
 
 
@@ -539,8 +571,30 @@ def _(mo):
 @app.function
 def evaluer_detections(predictions, verites, seuil_iou=0.5):
     """predictions : liste de (boite, score) ; verites : liste de boîtes. Renvoie tp, fp, fn, precision, rappel."""
-    # TODO 4
-    raise NotImplementedError("À compléter")
+    triees = sorted(predictions,key=lambda p:p[1],reverse = True)
+    associee=[]
+    for _ in verites:
+        associee.append(False)
+    tp=0
+    fp=0
+    for boites, score in triees:
+        meilleur_iou = 0.0
+        meilleur_verite = -1
+        for j in range(len(verites)):
+            if not associee[j]:
+                valeur = iou(boites,verites[j])
+                if valeur > meilleur_iou:
+                    meilleur_iou = valeur
+                    meilleur_verite = j
+        if meilleur_verite >= 0 and meilleur_iou >= seuil_iou :
+            tp+=1
+            associee[meilleur_verite]=True
+        else :
+            fp+=1
+    fn = len(verites)-tp
+    precision = tp/(tp+fp) if tp+fp >0 else 0.0
+    rappel = tp/(tp+fn) if tp+fn >0 else 0.0
+    return{"tp":tp, "fp":fp,"fn":fn,"precision":precision,"rappel":rappel}
 
 
 @app.cell(hide_code=True)
@@ -683,8 +737,8 @@ def _(mo):
     mo.md(r"""
     **Votre réponse :**
 
-    1. ...
-    2. ...
+    1. Le masque prend plus souvent les gilets que les casques, ce qui fait qu'on perd tous les casques annotés.
+    2. Non, car notre masque repère un objet présent ; il ne peut pas signaler quand il manque sur une tête.
     """)
     return
 
@@ -807,9 +861,9 @@ def _(mo):
     mo.md(r"""
     **Votre réponse :**
 
-    1. ...
-    2. ...
-    3. ...
+    1. Goggles,Vest et Person ont les 3 meilleurs AP@0.5. Goggles avait peu de boite et une petite taille de boite, la vest est bien représenté et la taille est petite mais pas la plus petite et Person est la classe la mieux représenté et avec une des plus grande taille.
+    2. Le mAP@0.5:0.95 exige des IOU de 0,55 à 0,95, soit un placement plus précis. Il est donc plus dur sur des petites boites d'avoir un bon placement et donc un score supérieur que AP@0.5.Nous avons vu en cours qu'un très leger d"calage de px peut faire changer drastiquement baissé le score.
+    3. 4 epoques avec 0.4 de part d'images, cela m'a pris 29 secondes à réalisé. cela pour faire 40% de l'image, avec 4 epoques au lieu de 20 et une résolution de 320px au lieu de 416px. Pour faire comme le modèle fourni, je dois multiplier : 1/0,4 * 20/4 *(416/320)^2 = 21, donc 21 * 29s = 610 s, soit presque 10 mins. J'en conclus qu'il faudrait un vrai GPU pour faire ce projet plus rapidement.
     """)
     return
 
@@ -849,8 +903,29 @@ def _(mo):
 @app.function
 def courbe_seuils(predictions_par_image, verites_par_image, seuils):
     """Précision, rappel et F1 cumulés sur toutes les images, pour chaque seuil de confiance."""
-    # TODO 5
-    raise NotImplementedError("À compléter")
+    resultats = {"seuil":[],"precision":[],"rappel":[],"f1":[]}
+    for seuil in seuils:
+        tp=0
+        fp=0
+        fn=0
+        for predictions,verites in zip(predictions_par_image,verites_par_image):
+            gardees = []
+            for boite,score in predictions:
+                if score >= seuil:
+                    gardees.append((boite,score))
+            r= evaluer_detections(gardees,verites)
+            tp +=r["tp"]
+            fp +=r["fp"]
+            fn +=r["fn"]
+        precision = tp/(tp+fp) if tp+fp > 0 else 0.0
+        rappel = tp/(tp+fn) if tp +fn >0 else 0.0
+        f1 = 2*precision*rappel/(precision+rappel) if precision + rappel >0 else 0.0
+
+        resultats["seuil"].append(seuil)
+        resultats["precision"].append(precision)
+        resultats["rappel"].append(rappel)
+        resultats["f1"].append(f1)
+    return resultats
 
 
 @app.cell(hide_code=True)
@@ -1028,9 +1103,9 @@ def _(mo):
     mo.md(r"""
     **Votre réponse :**
 
-    1. ...
-    2. ...
-    3. ...
+    1. J'ai utilisé le meilleur score F1 pour fixer mon seuil à 0,35. Cela nous donne le plus de « positifs » et donc plus de chances d’analyser correctement s’il y a un risque. Mais bien sûr,  nous avons encore 107 oublis, ce qui est un risque très important sur le chantier.
+    2. Oui, c'est ce qu'on arrive à lire sur la courbe. Nous avons 179 objets, donc n=179 => 1,96*sqrt(0.83(1-0.83)/179)= 0,06, donc 83% de précision avec +-0,06.
+    3. Des images de loin, les objets à détecter sont minuscules. Beaucoup d'information, peu de lumière sur certaines zones.
     """)
     return
 
@@ -1109,7 +1184,7 @@ def _(mo):
 @app.cell
 def _(mo):
     mo.md(r"""
-    **Votre réponse :** ...
+    **Votre réponse :** DeepLab est systématiquement le plus rapide des deux. Seul YOLO et SAm sont capable de compter le nombre de personnes. Si je dois anlyser enormément de photo a analyser, sans que j'ai besoin de connaitre le nombre de detection, c'est forcément DeepLab qui l'emporte. mais si je veux analyser moins de photo mais faire des vérification sur la quantité de personnes sur le chantier, ji'rai pour Yolo et Sam.
     """)
     return
 
@@ -1169,12 +1244,12 @@ def _(mo):
     | Rubrique | Votre réponse |
     |---|---|
     | Problème métier | Détecter les personnes sans casque sur un chantier |
-    | Baseline classique et son score (test, classe casque : elle ne détecte pas l'absence de casque) | ... |
+    | Baseline classique et son score (test, classe casque : elle ne détecte pas l'absence de casque) | Sur la validation, F1 maximal : 0.78 au seuil 0.35 (précision 96%, rappel 66%). |
     | Modèle retenu et pourquoi | ... |
-    | Métrique principale et score obtenu (test, classe `no_helmet`, au seuil retenu) | ... |
+    | Métrique principale et score obtenu (test, classe `no_helmet`, au seuil retenu) | f1 = 0,78, seuil 0,35 |
     | Seuil retenu et justification métier | ... |
-    | Coût (entraînement, inférence, matériel) ; pour l'inférence, le modèle fourni a la même architecture que le YOLOv8n de l'étape 4 | ... |
-    | Principaux cas d'échec | ... |
+    | Coût (entraînement, inférence, matériel) ; pour l'inférence, le modèle fourni a la même architecture que le YOLOv8n de l'étape 4 | environ 10 mins |
+    | Principaux cas d'échec | beaucoup de fausses alertes |
     | Le deep learning est-il justifié ici ? | ... |
     | Déployable en l'état ? Sinon, que manque-t-il ? | ... |
     """)
